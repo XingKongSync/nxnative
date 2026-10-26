@@ -21,6 +21,17 @@ def replace(source, old, new):
 
 
 
+def short_path(path):
+    """Apple's Windows Metal tools split arguments at spaces; use the 8.3 form of the build path."""
+    path = Path(path)
+    if os.name != 'nt' or ' ' not in str(path):
+        return path
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
+    return Path(buffer.value) if length else path
+
+
 def cache_directory(output, directory=None):
     """Keep Python-only shader cache IO usable beyond Windows MAX_PATH."""
     path = str(Path(directory or Path(output) / 'mac/cas').resolve())
@@ -39,7 +50,9 @@ def main():
     ap.add_argument('keys', nargs='*')
     a = ap.parse_args()
     repo = Path(__file__).resolve().parents[3]
-    root = a.out.resolve()
+    root = Path(os.path.abspath(str(a.out)))
+    root.mkdir(parents=True, exist_ok=True)
+    root = short_path(root)
     tools = root / 'chain/gfx/tools'
     tools.mkdir(parents=True, exist_ok=True)
     original = repo / 'dm/gfx/tools'

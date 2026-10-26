@@ -27,6 +27,31 @@ METAL = ''
 JOBS = 12
 
 
+def find_dotnet(tools):
+    """The SDK the addon tools run with: the prepared tools copy, else the host's dotnet."""
+    local = tools / 'dotnet' / 'dotnet.exe'
+    if local.is_file():
+        return local.resolve()
+    found = shutil.which('dotnet')
+    if found:
+        return Path(found).resolve()
+    for directory in (os.environ.get('DOTNET_ROOT'), os.environ.get('ProgramFiles', '') + '/dotnet'):
+        if directory and (Path(directory) / 'dotnet.exe').is_file():
+            return (Path(directory) / 'dotnet.exe').resolve()
+    raise ValueError('dotnet was not found: install the .NET 10 SDK or prepare the dependency bundle')
+
+
+def short_path(path):
+    """Apple's Windows Metal tools split arguments at spaces; use the 8.3 form of a build path."""
+    path = Path(path)
+    if os.name != 'nt' or ' ' not in str(path):
+        return path
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
+    return Path(buffer.value) if length else path
+
+
 def main():
     repo = Path(__file__).resolve().parents[3]
     ap = argparse.ArgumentParser(description=__doc__)
@@ -50,7 +75,8 @@ def main():
             ap.error('Set NSP_DIR or provide an NSP folder')
         a.folder = input('NSP folder: ').strip().strip('"')
     if not a.keys or not a.tools: ap.error('Supply --keys and --tools, or fill the settings block')
-    folder, tools = Path(a.folder).resolve(), a.tools.resolve()
+    folder, tools = short_path(Path(a.folder).resolve()), a.tools.resolve()
+    dotnet = find_dotnet(tools)
     a.metal = a.metal or Path(os.environ.get('METAL_EXE') or tools / 'metal/metal.exe')
     if not a.metal.is_file(): ap.error('Supply --metal with your installed Metal compiler')
     sys.path.insert(0, str(repo / 'dm/games'))
@@ -84,11 +110,11 @@ def main():
     profile = build / 'profile' / original.id
     shutil.copytree(original.dir, profile, dirs_exist_ok=True)
     g = game.Game(profile)
-    env = dict(os.environ, DOTNET_ROOT=str(tools / 'dotnet'), PYTHONUTF8='1', PYTHONPATH=str(tools / 'python-packages'),
+    env = dict(os.environ, DOTNET_ROOT=str(dotnet.parent), PYTHONUTF8='1', PYTHONPATH=str(tools / 'python-packages'),
                DM_GAME=str(profile), DM_ROOT=str(build), DM_RULESET='native',
                J=str(a.jobs), TEMP=str(temporary), TMP=str(temporary),
                DOTNET_CLI_HOME=str(tools / '.dotnet'))
-    env['PATH'] = str(tools / 'dotnet') + os.pathsep + env.get('PATH', '')
+    env['PATH'] = str(dotnet.parent) + os.pathsep + env.get('PATH', '')
     python = sys.executable
     started = time.monotonic()
     def count_files(root, suffix):
@@ -208,7 +234,7 @@ def main():
     run('windows_shaders', [python, repo / 'webui/build/windows/windows_shader_build.py', '--profile', profile,
                             '--packages', shader / 'packages', '--out', windows, '--metal', a.metal.resolve(),
                             '--spirv-cross', tools / 'spirv-cross-build/spirv-cross.exe',
-                            '--dotnet', tools / 'dotnet/dotnet.exe', '--cache-dir', tools / 'shader-cache', '--jobs', a.jobs],
+                            '--dotnet', dotnet, '--cache-dir', tools / 'shader-cache', '--jobs', a.jobs],
         progress=shader_progress)
     chain = re.search(r'#define DMSH_CHAIN "([a-f0-9]+)"', g.table('dmsh_chain.h').read_text())[1]
     run('c1_guard', [python, repo / 'dm/gfx/tools/c1_guard.py', windows / ('mac/b-' + chain), g.table('c1_full.tsv')])
