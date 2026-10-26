@@ -4,6 +4,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
+#import <objc/message.h>
 #include <errno.h>
 #include "front.h"
 #include "hle.h"
@@ -39,6 +40,13 @@ static UILabel *front_ios_fps_label(void);
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
 }
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    UIScreen *s = self.window.screen ?: UIScreen.mainScreen;
+    CAMetalLayer *l = (CAMetalLayer *)self.layer;
+    l.contentsScale = s.nativeScale;
+    [self setNeedsLayout];
+}
 @end
 
 @interface DmRootVC : UIViewController
@@ -50,6 +58,89 @@ static UILabel *front_ios_fps_label(void);
 @end
 static DmRootVC *g_root;
 static void launcher_done(void) { [g_root startGame]; }
+
+// ---- External display: the game picture on the monitor, the controls on the phone ----
+// The iPhone mirrors the app until it presents a window on the external display. That window has its own
+// 16:9 view for the game, so the phone's 19.5:9 letterboxing is no longer carried into the television.
+@interface DmExternalVC : UIViewController
+@property (nonatomic, strong) UIView *game;
+@end
+static UIWindow *g_ext_window;
+static DmExternalVC *g_ext_vc;
+static id g_ext_accessory_registration;   // iOS 27 scene accessory; nil on iOS 26
+
+@implementation DmExternalVC
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.blackColor;
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (!self.game) return;
+    CGRect b = self.view.bounds;
+    CGFloat w = b.size.width, h = b.size.height;
+    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
+    self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
+}
+- (BOOL)prefersStatusBarHidden { return YES; }
+- (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+@end
+
+static void front_ios_external_refresh(void) {
+    if (!g_ext_vc || !g_ext_window || !g_root.game || g_root.game.superview == g_ext_vc.view) return;
+    [g_root.game removeFromSuperview];
+    g_ext_vc.game = g_root.game;
+    [g_ext_vc.view addSubview:g_ext_vc.game];
+    [g_ext_vc.view setNeedsLayout]; [g_ext_vc.view layoutIfNeeded];
+}
+
+static void front_ios_external_detach(void) {
+    if (g_ext_vc.game) {
+        UIView *g = g_ext_vc.game;
+        [g removeFromSuperview]; g_ext_vc.game = nil;
+        if (g_root) { [g_root.view addSubview:g]; [g_root.view setNeedsLayout]; [g_root.view layoutIfNeeded]; }
+    }
+    g_ext_window.hidden = YES;
+    g_ext_window = nil; g_ext_vc = nil;
+}
+
+@interface DmExternalSceneDelegate : UIResponder <UIWindowSceneDelegate>
+@property (nonatomic, strong) UIWindow *window;
+@end
+static void front_ios_register_external_accessory(UIViewController *vc) {
+    if (g_ext_accessory_registration) return;
+    Class accessory = NSClassFromString(@"UISceneAccessory");
+    Class delegate = [DmExternalSceneDelegate class];   // keeps the class named in the scene manifest
+    if (!accessory || !delegate) return;
+    UISceneConfiguration *cfg = [[UISceneConfiguration alloc] initWithName:@"Default" sessionRole:UIWindowSceneSessionRoleExternalDisplayNonInteractive];
+    cfg.delegateClass = delegate;
+    SEL factory = NSSelectorFromString(@"externalNonInteractiveSceneAccessoryWithConfiguration:");
+    SEL registerSelector = NSSelectorFromString(@"registerSceneAccessory:");
+    if (![accessory respondsToSelector:factory] || ![vc respondsToSelector:registerSelector]) return;
+    id item = ((id (*)(id, SEL, id))objc_msgSend)(accessory, factory, cfg);
+    if (item) g_ext_accessory_registration = ((id (*)(id, SEL, id))objc_msgSend)(vc, registerSelector, item);
+    LOG("front end: external display scene accessory %s (iOS 27)", g_ext_accessory_registration ? "registered" : "not registered");
+}
+
+@implementation DmExternalSceneDelegate
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)o {
+    if (![session.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive]) return;
+    self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+    self.window.rootViewController = [DmExternalVC new];
+    [self.window makeKeyAndVisible];
+    g_ext_window = self.window; g_ext_vc = (DmExternalVC *)self.window.rootViewController;
+    front_ios_external_refresh();
+    if (g_root.view.window) [g_root.view.window makeKeyWindow];   // touches, alerts and the keyboard stay on the phone
+    LOG("front end: external display connected (%s), game view %s", self.window.screen.bounds.size.width > 0 ? "window ready" : "no screen", g_root.game ? "attached" : "waiting for the game");
+}
+- (void)sceneDidDisconnect:(UIScene *)scene {
+    LOG("front end: external display disconnected");
+    front_ios_external_detach();
+    self.window.hidden = YES; self.window = nil;
+}
+@end
+
 @implementation DmRootVC
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -79,15 +170,19 @@ static void launcher_done(void) { [g_root startGame]; }
     self.fps = front_ios_fps_label();   // above the pad, which hides while a controller is connected
     if (self.fps) [self.view addSubview:self.fps];
     [self.view setNeedsLayout]; [self.view layoutIfNeeded];
+    front_ios_register_external_accessory(self);   // iOS 27: the scene accessory brings up the monitor window
+    front_ios_external_refresh();                   // iOS 26: the external scene may already be connected
     UIApplication.sharedApplication.idleTimerDisabled = YES;
     front_ios_boot();
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
-    self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
+    if (self.game.superview == self.view) {   // Fit 16:9 into the phone; on the external display DmExternalVC fits it instead
+        CGFloat w = b.size.width, h = b.size.height;
+        if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
+        self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
+    }
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
@@ -97,6 +192,7 @@ static void launcher_done(void) { [g_root startGame]; }
     [super viewDidAppear:a];
     if (self.launched || !front_ios_boot_ok()) return;
     self.launched = YES; g_root = self;
+    if (self.view.window) [self.view.window makeKeyWindow];   // an external window must not take the phone's touches
     if (!dm_show_launcher((__bridge void *)self, launcher_done)) [self startGame];   // the settings screen first (Launcher.swift), when the app has one
 }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }

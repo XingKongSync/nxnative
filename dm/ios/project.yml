@@ -50,11 +50,14 @@ targets:
           - ProfileName: ExtendedGamepad
         CADisableMinimumFrameDurationOnPhone: true
         UIApplicationSceneManifest:
-          UIApplicationSupportsMultipleScenes: false
+          UIApplicationSupportsMultipleScenes: true
           UISceneConfigurations:
             UIWindowSceneSessionRoleApplication:
               - UISceneConfigurationName: Default
                 UISceneDelegateClassName: SceneDelegate
+            UIWindowSceneSessionRoleExternalDisplayNonInteractive:
+              - UISceneConfigurationName: Default
+                UISceneDelegateClassName: DmExternalSceneDelegate
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: ${DM_BUNDLE_ID}
       PRODUCT_NAME: DmIOS

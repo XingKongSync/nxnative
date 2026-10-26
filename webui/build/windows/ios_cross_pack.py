@@ -45,11 +45,14 @@ def base_info_plist(*, game_id, display_name, app_version, app_category):
         GCSupportedGameControllers=[dict(ProfileName='ExtendedGamepad')],
         CADisableMinimumFrameDurationOnPhone=True,
         UIApplicationSceneManifest=dict(
-            UIApplicationSupportsMultipleScenes=False,
+            UIApplicationSupportsMultipleScenes=True,
             UISceneConfigurations=dict(
                 UIWindowSceneSessionRoleApplication=[
                     dict(UISceneConfigurationName='Default',
                          UISceneDelegateClassName='SceneDelegate')],
+                UIWindowSceneSessionRoleExternalDisplayNonInteractive=[
+                    dict(UISceneConfigurationName='Default',
+                         UISceneDelegateClassName='DmExternalSceneDelegate')],
             ),
         ),
     )
