@@ -91,10 +91,11 @@ def main():
     for pattern in ('*.fixups.tsv', '*.gates.tsv', '*.params.tsv', '*.cuts.tsv', '*.obs.tsv'):
         for source in a.patched.glob(pattern):
             shutil.copyfile(source, dm / source.name)
-    for filename in ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv'):
+    for filename in ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv', 'cb_extent.tsv'):
         if a.prepare_only and not g.table(filename).exists():
             continue
-        shutil.copyfile(g.table(filename), dm / filename)
+        if g.table(filename).exists():   # cb_extent.tsv is optional: without it the host copies whole bindings
+            shutil.copyfile(g.table(filename), dm / filename)
     shutil.copyfile(a.font, dm / 'font/standard.ttf')
     subprocess.run([sys.executable, str(repo / 'dm/tools/make_ext_font.py'), str(dm / 'font/nintendo_ext.ttf'), str(a.letter_font)], check=True)
     plist = base_info_plist(
