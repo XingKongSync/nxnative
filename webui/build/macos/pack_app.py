@@ -25,7 +25,7 @@ def main():
     sys.path.insert(0, str(repo / 'dm/games'))
     import game
     profile = game.load(args.game)
-    chain = re.search(r'#define DMSH_CHAIN "([a-f0-9]+)"', profile.table('dmsh_chain.h').read_text())[1]
+    chain = re.search(r'#define DMSH_CHAIN "([a-f0-9]+)"', (repo / 'dm/gfx/nvn/dmsh_chain.h').read_text())[1]
     graphics = args.graphics
     shaders = args.shaders / ('vk' if graphics == 'vulkan' else 'b-' + chain)
     if not shaders.is_dir() or not list(shaders.glob('*.metallib')):

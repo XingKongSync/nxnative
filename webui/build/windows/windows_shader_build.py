@@ -55,6 +55,9 @@ def main():
     root = short_path(root)
     tools = root / 'chain/gfx/tools'
     tools.mkdir(parents=True, exist_ok=True)
+    # The upstream chain header is one file for every game (dm/gfx/nvn/dmsh_chain.h); the
+    # isolated Windows chain gets its own copy under chain/gfx/nvn.
+    (root / 'chain/gfx/nvn').mkdir(parents=True, exist_ok=True)
     original = repo / 'dm/gfx/tools'
     for p in original.glob('dmsh_*.py'):
         shutil.copyfile(p, tools / p.name)

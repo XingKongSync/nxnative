@@ -52,7 +52,20 @@ def short_path(path):
     return Path(buffer.value) if length else path
 
 
+_CHAIN_HEADER_PATH = None
+_CHAIN_HEADER_BYTES = None
+
+
+def restore_chain_header():
+    """Put the repository's Mac chain header back after the Windows chain temporarily replaced it."""
+    global _CHAIN_HEADER_PATH, _CHAIN_HEADER_BYTES
+    if _CHAIN_HEADER_PATH is not None and _CHAIN_HEADER_BYTES is not None:
+        _CHAIN_HEADER_PATH.write_bytes(_CHAIN_HEADER_BYTES)
+        _CHAIN_HEADER_PATH = _CHAIN_HEADER_BYTES = None
+
+
 def main():
+    global _CHAIN_HEADER_PATH, _CHAIN_HEADER_BYTES
     repo = Path(__file__).resolve().parents[3]
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('folder', nargs='?', default=NSP_DIR)
@@ -236,8 +249,15 @@ def main():
                             '--spirv-cross', tools / 'spirv-cross-build/spirv-cross.exe',
                             '--dotnet', dotnet, '--cache-dir', tools / 'shader-cache', '--jobs', a.jobs],
         progress=shader_progress)
-    chain = re.search(r'#define DMSH_CHAIN "([a-f0-9]+)"', g.table('dmsh_chain.h').read_text())[1]
+    # The Windows shader chain is isolated under windows/chain; its header is the version the
+    # packaged libraries and the host must agree on. The host includes dm/gfx/nvn/dmsh_chain.h,
+    # so swap that header for the Windows one while the host and IPA are built, then restore it.
+    windows_chain = windows / 'chain/gfx/nvn/dmsh_chain.h'
+    chain = re.search(r'#define DMSH_CHAIN "([a-f0-9]+)"', windows_chain.read_text())[1]
     run('c1_guard', [python, repo / 'dm/gfx/tools/c1_guard.py', windows / ('mac/b-' + chain), g.table('c1_full.tsv')])
+    chain_header = repo / 'dm/gfx/nvn/dmsh_chain.h'
+    _CHAIN_HEADER_PATH, _CHAIN_HEADER_BYTES = chain_header, chain_header.read_bytes()
+    chain_header.write_bytes(windows_chain.read_bytes())
     host = build / 'windows_host'
     clang = tools / 'ios-cross/toolchain/windows/iphone/bin/clang.exe'
     sdk = a.sdk.resolve() if a.sdk else tools / 'ios-cross/iPhoneOS26.5.sdk'
@@ -319,3 +339,5 @@ if __name__ == '__main__':
     except (OSError, ValueError, RuntimeError) as error:
         print('【红】' + str(error), file=sys.stderr)
         raise SystemExit(1)
+    finally:
+        restore_chain_header()

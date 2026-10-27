@@ -80,7 +80,7 @@ def main():
         from .ios_cross_link import macho_layout
     g = game.Game(a.profile)
     app_version = g.builds()[g.get('package')]['display']
-    chain = re.search(r'#define DMSH_CHAIN "([a-f0-9]+)"', g.table('dmsh_chain.h').read_text()).group(1)
+    chain = re.search(r'#define DMSH_CHAIN "([a-f0-9]+)"', (repo / 'dm/gfx/nvn/dmsh_chain.h').read_text()).group(1)
     stage = a.host / 'package_resources'
     dm = stage / 'dm'
     (dm / 'font').mkdir(parents=True, exist_ok=True)
