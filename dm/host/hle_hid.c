@@ -363,6 +363,12 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     dm_haptics_send(updates, count);
 }
 HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: enabled and an output available", unsigned, h_hid_VibPermit, void) { return dm_haptics_available() != 0; }
+// The game asks this before playing a vibration cue (Odyssey on entering a level). The SDK's answer would call detail::PermitVibration →
+// CreateHidServerProxy and open the hid service; the host serves no hid session, the proxy stays null and the SDK reads it (sdk+0x24254c).
+// Answer from the host's own vibration targets instead.
+HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration device mounted: an output is available for this handle", unsigned, h_hid_VibMounted, const uint32_t *h) {
+    return h && vib_targets(*h) ? 1 : 0;
+}
 HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "vibration devices of the connected controller",
           int, h_hid_VibHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
     if (!h || !id || n <= 0 || !(style & style_of(*id))) return 0;
