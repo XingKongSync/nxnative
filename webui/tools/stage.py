@@ -22,19 +22,22 @@ def main(argv=None):
     ensure.add_argument('--stage-root', type=Path)
     ensure.add_argument('--rebuild', action='store_true')
     ensure.add_argument('--json', action='store_true')
+    ensure.add_argument('--launcher', choices=staging.LAUNCHERS, default='objc')
 
     verify = sub.add_parser('verify', help='verify a stage')
     verify.add_argument('stage', type=Path, nargs='?')
 
-    sub.add_parser('key', help='print the current stage key')
+    key = sub.add_parser('key', help='print the current stage key')
+    key.add_argument('--launcher', choices=staging.LAUNCHERS, default='objc')
 
     run = sub.add_parser('run', help='run a command in the stage tree')
     run.add_argument('--stage-root', type=Path)
+    run.add_argument('--launcher', choices=staging.LAUNCHERS, default='objc')
     run.add_argument('command', nargs=argparse.REMAINDER)
 
     args = parser.parse_args(argv)
     if args.command == 'ensure':
-        tree = staging.ensure(staging.REPO, args.stage_root, force=args.rebuild)
+        tree = staging.ensure(staging.REPO, args.stage_root, force=args.rebuild, launcher=args.launcher)
         value = {'tree': str(tree), 'key': tree.parent.name}
         print(json.dumps(value) if args.json else str(tree))
         return 0
@@ -44,7 +47,7 @@ def main(argv=None):
         print(json.dumps(record, indent=2))
         return 0
     if args.command == 'key':
-        print(staging.compute_key(staging.REPO))
+        print(staging.compute_key(staging.REPO, launcher=args.launcher))
         return 0
     if args.command == 'run':
         command = args.command
@@ -52,7 +55,7 @@ def main(argv=None):
             command = command[1:]
         if not command:
             parser.error('run requires a command after --')
-        tree = staging.ensure(staging.REPO, args.stage_root)
+        tree = staging.ensure(staging.REPO, args.stage_root, launcher=args.launcher)
         env = dict(os.environ, NX_STAGE_TREE=str(tree), NX_STAGE_KEY=tree.parent.name)
         env['PYTHONPATH'] = os.pathsep.join([str(tree), env.get('PYTHONPATH', '')])
         return subprocess.run(command, cwd=tree, env=env).returncode

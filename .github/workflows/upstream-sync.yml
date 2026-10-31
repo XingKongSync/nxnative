@@ -33,6 +33,7 @@ jobs:
       MODE: ${{ github.event_name == 'schedule' && 'auto' || inputs.mode }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
       PYTHONUTF8: '1'
+      NX_REQUIRE_TEST_DEPS: '1'
       GIT_EXE: git
 
     steps:
@@ -127,9 +128,9 @@ jobs:
               git cat-file -e "${HOOKS_SHA}^{commit}"
               test "$(git rev-parse "${HOOKS_SHA}^")" = "$UPSTREAM_SHA"
           fi
-          test -z "$(git diff --name-only "$BASE_SHA..$SYNC_SHA" -- .github/workflows/upstream-sync.yml .gitattributes FORK.md start-webui.sh start-webui.command start-webui.bat)"
+          test -z "$(git diff --name-only "$BASE_SHA..$SYNC_SHA" -- .github/workflows/upstream-sync.yml .github/workflows/fork-ci.yml FORK.md start-webui.sh start-webui.command start-webui.bat)"
           test -z "$(git diff --name-only "$BASE_SHA..$SYNC_SHA" -- webui | grep -v '^webui/patches/' || true)"
-          if [ -n "$(git diff --name-only "$BASE_SHA..$SYNC_SHA" -- .github/workflows | grep -v '^\.github/workflows/upstream-sync.yml$' || true)" ]; then
+          if [ -n "$(git diff --name-only "$BASE_SHA..$SYNC_SHA" -- .github/workflows | grep -v '^\.github/workflows/\(upstream-sync\|fork-ci\).yml$' || true)" ]; then
               echo 'WORKFLOW_CHANGES=true' >> "$GITHUB_OUTPUT"
           else
               echo 'WORKFLOW_CHANGES=false' >> "$GITHUB_OUTPUT"

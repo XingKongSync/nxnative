@@ -8,7 +8,7 @@ Integration base: `xbunax/nxnative` main at `233f18f421344fcd3b61559459ef8649d6c
 - [x] Support chunked uploads, local path imports, metadata inspection, serial jobs, cancellation and interrupted-job recovery.
 - [x] Convert standard XCI secure partitions into per-title NSP files with integrity validation.
 - [x] Connect macOS/iOS packagers and Windows offline NVN iOS cross-compilation.
-- [x] Migrate language, operation mode and MetalFX spatial launch settings.
+- [x] Migrate language; the other launch settings now live in upstream's launcher.
 - [x] Keep tool/runtime preparation separate from proprietary SDKs, keys and game inputs.
 - [x] Complete Hades II NSP-to-IPA integration acceptance and record verification results.
 - [x] Finish browser verification, including Chinese/English switching.

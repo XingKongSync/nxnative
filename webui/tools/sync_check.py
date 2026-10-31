@@ -16,7 +16,7 @@ from webui import diffapply, staging
 from webui.repo import REPO, UPSTREAM_URL, ensure_git_exclude
 
 UPSTREAM_PATHS = ('dm', 'scripts', 'docs', '.github', 'README.md', 'AGENTS.md', 'LICENSE', '.gitignore')
-ALLOWED_EDITS = {'dm/ios/project.yml', '.github/workflows/upstream-sync.yml'}
+ALLOWED_EDITS = {'dm/ios/project.yml', '.github/workflows/upstream-sync.yml', '.github/workflows/fork-ci.yml'}
 OLD_PATHS = (
     'dm.webui',
     'dm/webui',

@@ -40,6 +40,19 @@ class RomfsArchiveTests(unittest.TestCase):
             discard_archive(archive)
             self.assertFalse(archive.exists())
 
+    def test_image_source_packs_one_romfs_img_entry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = root / 'RomFS.img'
+            image.write_bytes(b'image bytes')
+            archive = root / 'Game.romfs.zip'
+            command = pack_command(sys.executable, REPO / 'dm/ios/tools/pack_ipa.py', archive, image, '')
+            self.assertEqual(command[-1], f'romfs.img={image}')
+            subprocess.run(command, check=True, capture_output=True)
+            verify_archive(archive, 'System/Resource')
+            with zipfile.ZipFile(archive) as value:
+                self.assertEqual(value.namelist(), ['romfs.img'])
+
     def test_missing_marker_and_layout_errors(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

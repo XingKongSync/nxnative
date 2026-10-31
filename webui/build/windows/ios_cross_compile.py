@@ -14,6 +14,19 @@ import subprocess
 import sys
 
 
+def chain_overlay(repo, profile, out):
+    """Resolve NVN's quoted chain include to this Windows build's header."""
+    header = profile / 'dmsh_chain.h'
+    if not header.is_file():
+        raise ValueError('Windows shader chain header is missing; run windows_shader_build.py first: ' + str(header))
+    overlay = out / 'chain-overlay.json'
+    overlay.write_text(json.dumps({'version': 0, 'case-sensitive': 'false', 'roots': [
+        {'type': 'file', 'name': (repo / 'dm/gfx/nvn/dmsh_chain.h').as_posix(),
+         'external-contents': header.as_posix()}
+    ]}, indent=2) + '\n', encoding='utf-8')
+    return overlay
+
+
 def source_list(repo):
     host = repo / 'dm/host'
     text = (host / 'Makefile').read_text(encoding='utf-8')
@@ -37,7 +50,8 @@ def source_list(repo):
     sources = [p for p in expand('SRC') + expand('GFX')
                if not p.stem.endswith('_mac')]
     sources += sorted((repo / 'dm/ios/Sources').glob('*.m'))
-    sources.append(repo / 'webui/build/windows/launcher_stub.m')   # Windows has no Swift compiler; front_ios.m's dm_show_launcher
+    if not (repo / 'dm/ios/Sources/DmLauncher.m').is_file():   # the ObjC launcher (an 'objc' stage) defines dm_show_launcher; without it the stub does
+        sources.append(repo / 'webui/build/windows/launcher_stub.m')
     sources += sorted((repo / 'dm/third_party/libvpx').rglob('*.c'))
     if len(sources) != len(set(sources)):
         raise ValueError('Duplicate sources in expanded iOS source list')
@@ -69,6 +83,7 @@ def main():
     (out / 'include').mkdir(parents=True, exist_ok=True)
     (out / 'objects').mkdir(exist_ok=True)
     (out / 'logs').mkdir(exist_ok=True)
+    overlay = chain_overlay(repo, profile, out)
     sys.path.insert(0, str(repo / 'dm/games'))
     import game
     g = game.Game(profile)
@@ -81,6 +96,7 @@ def main():
     common = [str(clang), '-target', 'arm64-apple-ios26.0', '-isysroot', str(sdk),
               '-F', str(sdk / 'System/Library/SubFrameworks'),
               '-DUSE_UIKIT_PUBLIC_HEADERS=1', '-fobjc-arc', f'-mcpu={args.cpu}',
+              '-ivfsoverlay', str(overlay),
               '-O1', '-g', '-Wno-deprecated-declarations', '-Wno-unused-function']
     common += [f'-I{p}' for p in dict.fromkeys(includes)]
 

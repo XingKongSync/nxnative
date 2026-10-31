@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Materialize and run an isolated Windows port of the pinned shader chain.
 
-The generated sources and real tool fingerprints define a separate chain ID.
+The generated sources, native translator and real tool fingerprints define a separate chain ID.
 The repository's Mac chain and its lock are never overwritten.
 """
 import argparse
+import ast
 import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import sys
@@ -20,6 +22,27 @@ def replace(source, old, new):
     return source.replace(old, new)
 
 
+def metal_command(source, name, metal, target, cache):
+    """Port the command prefix while retaining upstream shader semantics."""
+    assignments = [node for node in ast.parse(source).body
+                   if isinstance(node, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)]
+    if len(assignments) != 1:
+        raise ValueError('Expected one upstream Metal command: ' + name)
+    value = assignments[0].value
+    command = ast.literal_eval(value)
+    if (not isinstance(command, list) or len(command) < 5
+            or command[:2] != ['xcrun', '-sdk'] or command[3:5] != ['metal', '-c']
+            or not all(isinstance(arg, str) for arg in command)):
+        raise ValueError('Unsupported upstream Metal command: ' + name)
+    flags = []
+    for arg in command[4:]:
+        if arg.startswith('-mios-version-min='):
+            target = 'air64-apple-ios' + arg.split('=', 1)[1]
+        else:
+            flags.append(arg)
+    result = [metal, '-target', target, *flags, '-fmodules-cache-path=' + str(cache)]
+    return replace(source, ast.get_source_segment(source, value), repr(result))
 
 def short_path(path):
     """Apple's Windows Metal tools split arguments at spaces; use the 8.3 form of the build path."""
@@ -32,12 +55,24 @@ def short_path(path):
     return Path(buffer.value) if length else path
 
 
-def cache_directory(output, directory=None):
-    """Keep Python-only shader cache IO usable beyond Windows MAX_PATH."""
-    path = str(Path(directory or Path(output) / 'mac/cas').resolve())
+def filesystem_path(path):
+    """Use extended paths for Python IO; external tools keep normal paths."""
+    path = str(Path(path).resolve())
     if os.name == 'nt' and not str(path).startswith('\\\\?\\'):
         path = '\\\\?\\UNC\\' + path[2:] if path.startswith('\\\\') else '\\\\?\\' + path
     return path
+
+
+def cache_directory(output, directory=None):
+    """Keep Python-only shader cache IO usable beyond Windows MAX_PATH."""
+    return filesystem_path(directory or Path(output) / 'mac/cas')
+
+
+def publish_chain_header(output, profile):
+    """Expose the isolated chain version to the host compiler and IPA packer."""
+    profile = Path(profile)
+    profile.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(Path(output) / 'chain/gfx/nvn/dmsh_chain.h', profile / 'dmsh_chain.h')
 
 
 def main():
@@ -59,10 +94,25 @@ def main():
     # isolated Windows chain gets its own copy under chain/gfx/nvn.
     (root / 'chain/gfx/nvn').mkdir(parents=True, exist_ok=True)
     original = repo / 'dm/gfx/tools'
+    # Include every source hashed by the upstream chain, including Metal helpers
+    # and vendored translator changes, without maintaining a second file list.
+    chain = runpy.run_path(str(original / 'dmsh_chain.py'))
+    for name in chain['FILES']:
+        dest = tools.parent / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(original.parent / name, dest)
+    (tools.parent / 'nvn').mkdir(exist_ok=True)
     for p in original.glob('dmsh_*.py'):
         shutil.copyfile(p, tools / p.name)
+    for name in ('c1_guard.py', 'cb_extent.py'):
+        shutil.copyfile(original / name, tools / name)
     for folder in ('dmsh_xlate',):
-        shutil.copytree(original / folder, tools / folder, dirs_exist_ok=True)
+        shutil.copytree(filesystem_path(original / folder), filesystem_path(tools / folder), dirs_exist_ok=True)
+    # Some Ryujinx.Common filenames exceed MAX_PATH under real task folders.
+    # Prefix both ends: shutil's recursive copies inherit extended path handling.
+    shutil.copytree(filesystem_path(repo / 'dm/third_party/ryujinx'),
+                    filesystem_path(root / 'chain/third_party/ryujinx'),
+                    dirs_exist_ok=True, ignore=shutil.ignore_patterns('bin', 'obj'))
     # Git's Windows checkout uses CRLF; the pinned translator embeds LF sources.
     for name in ('Program.cs', 'dmsh_xlate.csproj'):
         p = tools / 'dmsh_xlate' / name
@@ -74,27 +124,20 @@ def main():
     metal = str(a.metal.resolve())
     metallib = str(a.metal.resolve().with_name('metallib.exe'))
     dotnet = str(a.dotnet.resolve())
-    dll = str(original / 'dmsh_xlate_bin/dmsh_xlate.dll')
+    dll = str(tools / 'dmsh_xlate_bin/dmsh_xlate.dll')
     sc = str(a.spirv_cross.resolve())
     cache = root / 'module_cache'
     cache.mkdir(exist_ok=True)
-    def command(target, relaxed=False):
-        return [metal, '-c', '-target', target, '-fpreserve-invariance',
-                '-fmodules-cache-path=' + str(cache)] + (['-fmetal-math-mode=relaxed'] if relaxed else [])
-    mac = command('air64-apple-macos14.0')
-    ios = command('air64-apple-ios18.0', True)
     build = (tools / 'dmsh_build.py').read_text(encoding='utf-8')
-    build = replace(build, "MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fpreserve-invariance']", 'MAC_METAL = ' + repr(mac))
+    build = metal_command(build, 'MAC_METAL', metal, 'air64-apple-macos14.0', cache)
     build = replace(build, "'; xcrun -sdk macosx metallib'", repr('; ' + metallib))
     build = replace(build, "['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib]", repr([metallib]) + " + [air, '-o', lib]")
     build = replace(build, '[XLATE, jp, w]', repr([dotnet, dll]) + ' + [jp, w]')
-    build = replace(build, "['spirv-cross',", '[' + repr(sc) + ',')
     (tools / 'dmsh_build.py').write_text(build, encoding='utf-8')
     ip = root / 'chain/ios/tools/ios_metal.py'
     src = ip.read_text(encoding='utf-8')
-    start = src.index('METAL = ')
-    end = src.index('RECORD = ', start)
-    src = src[:start] + 'METAL = ' + repr(ios) + '\nMETALLIB = ' + repr([metallib]) + '\n' + src[end:]
+    src = metal_command(src, 'METAL', metal, 'air64-apple-ios18.0', cache)
+    src = replace(src, "['xcrun', '-sdk', 'iphoneos', 'metallib']", repr([metallib]))
     ip.write_text(src, encoding='utf-8')
     cp = tools / 'dmsh_mtlcache.py'
     src = cp.read_text(encoding='utf-8')
@@ -107,7 +150,6 @@ def main():
     cp.write_text(src, encoding='utf-8')
     cp = tools / 'dmsh_chain.py'
     src = cp.read_text(encoding='utf-8')
-    src = replace(src, "['which', 'spirv-cross']", "['where.exe', " + repr(sc) + ']')
     src = replace(src, "[os.path.join(XLATE_DIR, 'dmsh_xlate'), '--source-sha']", repr([dotnet, dll, '--source-sha']))
     src = replace(src, "['xcrun', '-sdk', sdk, 'metal', '--version']", repr([metal, '--version']))
     src = replace(src, '    return t\n', '    t["windows_tools"] = ' + repr(identity) + '\n    return t\n')
@@ -136,8 +178,14 @@ def windows_replace(source, destination):
         position = src.index(anchor)
         p.write_text(src[:position] + retry + src[position:], encoding='utf-8')
     shutil.copyfile(__file__, tools / 'windows_shader_build.py')
-    env = dict(os.environ, DM_GAME=str(a.profile.resolve()), XLATE=str(original / 'dmsh_xlate_bin/dmsh_xlate'),
-               PYTHONUTF8='1', J=str(a.jobs), IOSOUT=str(root / 'ios'), WORK=str(root / 'work'))
+    env = dict(os.environ, DM_GAME=str(a.profile.resolve()), XLATE=str(Path(dll).with_suffix('')),
+               SPIRV_CROSS=sc, PYTHONUTF8='1', J=str(a.jobs), IOSOUT=str(root / 'ios'), WORK=str(root / 'work'),
+               DOTNET_ROOT=str(a.dotnet.resolve().parent),
+               DOTNET_CLI_UI_LANGUAGE='en', DOTNET_CLI_TELEMETRY_OPTOUT='1',
+               DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1', DOTNET_GENERATE_ASPNET_CERTIFICATE='false',
+               DOTNET_CLI_HOME=os.environ.get('DOTNET_CLI_HOME', str(root / '.dotnet')),
+               # With a system dotnet, a.dotnet.parent is Program Files: keep the package cache under the build.
+               NUGET_PACKAGES=os.environ.get('NUGET_PACKAGES') or str(tools / 'nuget'))
     # CAS holds only Python-managed files; external compilers use WORK and IOSOUT.
     # Prefix the cache root so atomic copies and JSON writes can exceed MAX_PATH.
     env['DMSH_CAS'] = cache_directory(root, a.cache_dir or env.get('DMSH_CAS'))
@@ -148,9 +196,16 @@ def windows_replace(source, destination):
     for name in ('dmsh_xlate.dll', 'Ryujinx.Graphics.Shader.dll', 'Ryujinx.Common.dll'):
         if hashlib.sha256((original / 'dmsh_xlate_bin' / name).read_bytes()).hexdigest()[:16] != lock[name]:
             raise ValueError('Pinned translator differs: ' + name)
+    # Upstream's macOS ARM64 ReadyToRun assemblies cannot load in Windows x64
+    # dotnet. Build the same sources as portable IL; fingerprint these outputs in
+    # the isolated Windows lock rather than changing the upstream binaries/lock.
+    subprocess.run([dotnet, 'publish', str(tools / 'dmsh_xlate/dmsh_xlate.csproj'),
+                    '-c', 'Release', '-o', str(Path(dll).parent), '--self-contained', 'false',
+                    '-p:PublishReadyToRun=false', '-p:UseAppHost=false'], env=env, check=True)
     subprocess.run([sys.executable, str(cp), '--update-lock'], env=env, check=True)
     subprocess.run([sys.executable, str(cp), '--check-tools'], env=env, check=True)
     subprocess.run([sys.executable, str(cp), '--header'], env=env, check=True)
+    publish_chain_header(root, a.profile.resolve())
     (root / 'windows_tools.json').write_text(identity + '\n', encoding='utf-8')
     if not a.prepare_only:
         subprocess.run([sys.executable, str(tools / 'dmsh_build.py'), str(a.packages.resolve()), str(root / 'mac'), *a.keys], env=env, check=True)

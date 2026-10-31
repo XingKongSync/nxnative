@@ -3,6 +3,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from webui.tests import require
+require('capstone')   # skipped when the package is missing
+
 from webui.build.windows import verify_nso_rewrite as verifier
 
 BUILD_ID = '00112233445566778899aabbccddeeff'

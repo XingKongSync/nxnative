@@ -16,7 +16,7 @@ You may still override the location with `--data-dir` or `NX_DATA_DIR`, includin
 
 Open the URL printed by the launcher. The token is exchanged for a local session cookie and removed from the address bar. The service rejects foreign origins and non-loopback hosts. It is a local, single-user tool; do not expose it through a proxy or a public interface. Only one process may use a given data folder.
 
-`start-webui.bat`, `start-webui.sh` and `start-webui.command` are launch shortcuts (the internal launchers are under `webui/launchers/`). Set `NX_TOOLS_DIR` to use an external prepared tools folder. Windows always uses the project-local runtime; the Mac launcher uses the optional `runtime/bin/python3` in that tools folder or system Python. In Spyder, edit the settings at the top of `start_webui.py` and press F5.
+`start-webui.bat`, `start-webui.sh` and `start-webui.command` are launch shortcuts (the internal launchers are under `webui/launchers/`). Set `NX_TOOLS_DIR` to use an external prepared tools folder. Windows always uses the project-local runtime; the Mac launcher uses the optional `runtime/bin/python3` in that tools folder or system Python. In Spyder, open `webui/launchers/start_webui.py`, edit the settings at the top and press F5.
 
 ## Tools and platforms
 
@@ -81,7 +81,7 @@ The WebUI does not accept arbitrary commands, package names or download URLs. In
 ## Workflow
 
 1. Upload files, or import existing absolute file paths to avoid another large upload. Chunk uploads resume after reselecting the same file in the same browser. The newest saved keys file is selected automatically; previously uploaded files can be re-added from the upload history. Supply the base game and all profile-required updates.
-2. Choose **Build an app**, **Convert XCI/NSZ to NSP**, or **Inspect game metadata**. For builds, choose iOS and/or macOS and the initial game language, handheld/docked mode, spatial upscaling, and output resolution. For iOS you can also tick **Separate IPA and RomFS** (off by default). NSZ files can also be added directly to a build; they are decompressed before inspection. If the base title ID has no profile, the task first surveys the supplied base and newest update and continues with a provisional profile; review `provisional.json` and expect that the app may need bring-up.
+2. Choose **Build an app**, **Convert XCI/NSZ to NSP**, or **Inspect game metadata**. For builds, choose iOS and/or macOS, the game language (the build's default; the other settings are chosen in the app's own launcher) and, for iOS, the launcher: ObjC (the default; the same settings screen as upstream's, and the only one the Windows cross-build can make) or Swift (upstream's own). For iOS you can also tick **Separate IPA and RomFS** (off by default). NSZ files can also be added directly to a build; they are decompressed before inspection. If the base title ID has no profile, the task first surveys the supplied base and newest update and continues with a provisional profile; review `provisional.json` and expect that the app may need bring-up.
 3. Follow the task journal and log. Cancel stops the worker process tree. Downloads are limited to published artifacts. A target failure preserves any successful output from another target.
 
 ### Separate IPA and RomFS (optional, iOS)
@@ -97,7 +97,13 @@ Install the IPA first. In the Files app, open **On My iPhone/iPad → \<App Name
 
 macOS `.app.zip` always includes its RomFS. If both targets are selected, the iOS build produces the one archive and the macOS app stays self-contained. AOC/DLC stays in the IPA. A sideloading reinstall can create a new Documents container, so copy `romfs` again; the host needs roughly one extra RomFS of output space, and the device needs room for both the archive and the extracted folder.
 
-Language and operating mode apply before game launch. Both app launchers allow changing the defaults and restoring the packaged choices. Spatial upscaling uses Metal 4 FX on supported NVN devices, with ordinary presentation as fallback. It does not add frame generation or force the game's dynamic resolution off. Vulkan output disables the spatial option. The iOS Game Settings also has a **Performance HUD** toggle showing presented FPS, game input and presented output resolution, and app memory use/headroom. Game settings/save data can override the requested language. Device gameplay and scaling quality still require testing on Apple hardware.
+The game language is the build's default (`--language`). The launcher, shown before the game starts on iOS (either implementation) and in the Mac app, lets the player change it and every other setting (console mode, MetalFX upscaling, ...) and restore the tested defaults; both iOS launchers read the same `dm/launcher.json`, so they show the same screen. The Windows iOS cross-build writes that file too (`dm/games/settings.py`). Game settings/save data can override the requested language. Device gameplay and scaling quality still require testing on Apple hardware.
+
+Both iOS launchers also have **Interface language** beside Play, with English and
+Simplified Chinese. It changes the launcher text immediately and remembers the
+choice independently of Game language. The first launch follows the device's
+language; resetting game settings keeps this interface preference. Rebuild the app
+to include this control in an existing IPA.
 
 XCI conversion validates container bounds, partition hashes, CNMT content membership and content hashes, then streams the original encrypted NCA files into standard NSP containers. Multi-title secure partitions produce separate NSPs. Compressed/split XCI formats are not supported. The converter does not acquire keys or game files.
 

@@ -164,8 +164,11 @@ class WorkflowTests(unittest.TestCase):
             if 'git push' in line and 'refs/heads/main' in line:
                 self.assertNotIn('--force', line)
         self.assertIn('git merge-base --is-ancestor', self.text)
-        self.assertIn('git diff --name-only "$BASE_SHA..$SYNC_SHA" -- .github/workflows/upstream-sync.yml .gitattributes', self.text)
+        self.assertIn('git diff --name-only "$BASE_SHA..$SYNC_SHA" -- .github/workflows/upstream-sync.yml .github/workflows/fork-ci.yml FORK.md', self.text)
         self.assertIn("grep -v '^webui/patches/'", self.text)
+
+    def test_ci_requires_test_dependencies(self):
+        self.assertIn("NX_REQUIRE_TEST_DEPS: '1'", self.text)
 
     def test_failure_and_review_notifications_exist(self):
         self.assertIn('gh issue create', self.text)
@@ -176,3 +179,30 @@ class WorkflowTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ForkCiWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.path = Path(__file__).resolve().parents[2] / '.github/workflows/fork-ci.yml'
+        self.text = self.path.read_text(encoding='utf-8')
+
+    def test_it_is_fork_owned_so_a_sync_never_takes_it_from_upstream(self):
+        self.assertTrue(sync_upstream._is_owned('.github/workflows/fork-ci.yml'))
+        self.assertIn('fork-ci.yml', (Path(__file__).resolve().parents[2] / '.github/workflows/upstream-sync.yml').read_text(encoding='utf-8'))
+
+    def test_both_launchers_are_staged_and_built(self):
+        self.assertIn('launcher: [objc, swiftui]', self.text)
+        self.assertIn("stage.py ensure --launcher '${{ matrix.launcher }}'", self.text)
+        self.assertIn('dm/ios/tools/compile_check.py', self.text)
+        self.assertIn('dm/ios/tools/build_smoke.py', self.text)
+
+    def test_the_webui_tests_fail_on_missing_dependencies(self):
+        self.assertIn("NX_REQUIRE_TEST_DEPS: '1'", self.text)
+        self.assertIn('unittest discover -s webui/tests', self.text)
+
+    def test_actions_are_pinned_to_commits_and_the_token_is_read_only(self):
+        for line in self.text.splitlines():
+            if 'uses:' in line and 'actions/' in line:
+                self.assertRegex(line, r'@[0-9a-f]{40} # ', line)
+        self.assertIn('contents: read', self.text)
+        self.assertNotIn('pull_request_target', self.text)

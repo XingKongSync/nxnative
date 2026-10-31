@@ -1,13 +1,32 @@
 // Common header of the native Switch host (multi-module).
 #pragma once
 #include <pthread.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
-#define MAX_MOD 128   // the profile's modules (up to 8) and the NROs a game loads at run time (Super Smash Bros. Ultimate: 98)
+// Explicit host work does not occupy a guest core (Metal submission, or a blocked native codec lock). A contended host mutex must count as blocked: a signal's same-core handoff
+// can otherwise wait forever for a peer that needs the signaller's native lock. Uncontended locks retain guest ordering; the counter nests inside existing host work.
+extern __thread _Atomic int dm_host_work;
+static inline int dm_host_mutex_lock(pthread_mutex_t *mutex) {
+    int r = pthread_mutex_trylock(mutex);
+    if (r != EBUSY) return r;
+    dm_host_work++;
+    r = pthread_mutex_lock(mutex);
+    dm_host_work--;
+    return r;
+}
+// Joining a native helper releases the guest core while that helper finishes; preserve any enclosing host-work scope.
+static inline int dm_host_thread_join(pthread_t thread, void **result) {
+    dm_host_work++;
+    int r = pthread_join(thread, result);
+    dm_host_work--;
+    return r;
+}
+
 #define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
@@ -42,14 +61,15 @@ typedef struct {
     uint64_t init, init_array, init_arraysz;   // init = DT_INIT (the module's _init: registers the DSO and runs this module's init_array)
     uint64_t fini;             // DT_FINI (nn::ro::UnloadModule calls it)
     // NRO modules (nn::ro, loader.c "NRO modules"): mapped at start like the others, but they take part in symbol lookups only between LoadModule and UnloadModule
-    int nro, loaded;           // loaded: the profile's modules always; an NRO while the game has it loaded
+    int nro;
+    _Atomic int loaded;        // the profile's modules always; NRO activation also synchronizes with borrowed stack backing
     uint8_t sha256[32];        // an NRO's SHA-256 (what the game's NRR registers; LoadModule finds the module by the image it passes)
     uint32_t nro_size;         // an NRO's file size (header +0x18), the bytes the hash covers
-    uint8_t *pristine; size_t pristine_len;   // an NRO's data and bss as rewritten, restored before each load after the first
+    uint8_t *pristine; size_t pristine_len;   // an NRO's initialized data as rewritten; reload restores this and zeroes its bss
     unsigned loads;            // how many times the game loaded it
 } module_t;
 
-extern module_t g_mod[MAX_MOD];
+extern module_t *g_mod;         // allocated once from the NSO list and NRO manifest; module addresses stay stable
 extern int g_nmod;
 // main's build ID (empty if none): code with fixed addresses in a game's module runs only on the build they were found in
 static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].build_id; return ""; }
@@ -62,6 +82,7 @@ module_t *nro_find(const uint8_t sha256[32]);   // the mapped NRO with this hash
 int nro_refused(const uint8_t sha256[32]);      // an NRO the pack refused (an online SDK, nro.tsv "refused")
 void nro_load(module_t *m);     // relocate an NRO against the loaded modules and bind the earlier modules' imports it defines (the caller runs its init)
 void nro_unload(module_t *m);   // take an NRO out of the lookups and bind the imports that pointed into it again
+int svc_nro_deactivate(module_t *m);   // mark inactive under the memory map lock, refusing while a stack borrows its data
 void *module_sym(module_t *m, const char *name);
 int dm_sdk_major(void);   // SDK major version from the sdk module's version string (loader.c); 0 = unknown
 #define DM_SDK_OLD(major) ((major) > 0 && (major) <= 10)   // SDK 10 and older: NVN API 53, the shared-font address points at the TTF itself
@@ -71,10 +92,14 @@ module_t *module_of(const void *p);
 // Gate dispatch: rewritten svc / timer reads come in through the common entry, ret_addr = the return point of that gate block, regs points to the saved x0..x30
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
 // Observation gates (rewriter OBS tables in the profiles' patches.py, applied by patch_nso.py; numbering matches): read-only callbacks, called on a gate hit once attached
-enum { OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20,   // Metroid Dread 2.1.0's movie request ring (hle_movie.c)
-       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)
-       OBS_MAX = 22 };
-void gate_obs_set(int id, void (*fn)(const uint64_t *regs));
+// IDs 19 / 20 belonged to the removed movie request-ring workaround. Old rewritten modules may still contain them; without callbacks those gates are harmless passes through.
+enum { OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)
+       OBS_REGION_ASK = 22, OBS_REGION_GOT = 23, OBS_REGION_FREE = 24,   // the SDK's address regions, gates the rewriter places by symbol in every sdk (patch_nso.py "Address regions", hle_svc.c)
+       OBS_STDALLOC_INIT = 25,                                         // StandardAllocator::Initialize's entry, the same way: the one gate whose callback writes a register (hle_svc.c)
+       OBS_MAX = 26 };
+// A gate number's bits from 8 up are a parameter for its callback (OBS_REGION_GOT: the register that holds the address). Callbacks read the registers; a write to x0–x29 takes
+// effect when the gate returns (entry.S restores them from the frame), which only OBS_STDALLOC_INIT does
+void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));
 int gate_obs_present(int id);
 uint64_t now_ns(void);
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
@@ -94,12 +119,14 @@ uint64_t crash_watch_progress_count(void);
 void crash_dump_now(const char *why);   // Dump state on demand (threads + graphics wait points), without exiting
 // Diagnostic switches: read once from environment variables when main starts (getenv takes the libc global environment lock, and on a hot path it would make all guest threads queue up)
 extern uint64_t g_t0_ns;   // Host start time (now_ns), used for relative times in the log
-extern struct dm_flags { int thr, svc, fs, movie, dbg, imports, bootprof; } g_flag;
+extern struct dm_flags { int thr, svc, fs, dbg, imports, bootprof; } g_flag;
 void *objmap_get(const void *guest); void objmap_put(const void *guest, void *host); void *objmap_del(const void *guest);
 void hle_signal_system_event(void *g);   // hle_thread.c: signal a service-layer SystemEvent (any thread)
 void hle_bind_system_event(void *g, int autoclear);   // On a guest thread, bind a guest SystemEvent to a kernel event
 void hle_clear_system_event(void *g);    // hle_thread.c: clear a bound service-layer SystemEvent (any thread)
 int hle_signal_bound_system_event(void *g);   // hle_thread.c: signal a service-layer SystemEvent only if it is bound (any thread); 0 when it is not
+uint64_t hle_system_event_binding(void *g);   // Opaque lifetime ID of a binding, 0 if unbound; a rebind gets a new ID even if its address and handle are reused
+int hle_signal_system_event_binding(uint64_t binding);   // Signal only this binding lifetime (any thread); 0 after its write handle closes
 // Page fault hook / hook before the host writes guest memory (crash.c; used for write-protect dirty page tracking)
 void dm_fault_hook_register(int (*fn)(void *addr, int is_write, void *uc));
 void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len));

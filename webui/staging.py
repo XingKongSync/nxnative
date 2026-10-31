@@ -1,7 +1,8 @@
 """Materialize a build staging tree from the working tree.
 
-The stage is a full copy (never a writable hardlink) of the repository with seven
-fork-only source overlays and nine upstream hook patches applied.  Builds run
+The stage is a full copy (never a writable hardlink) of the repository with the
+fork's source overlays and the upstream hook patches applied; for the 'objc' launcher the ObjC port replaces
+upstream's Swift launcher files; 'swiftui' keeps them with the UI hook patches. Builds run
 only from the stage, so the working tree's upstream files stay untouched.
 """
 from __future__ import annotations
@@ -23,15 +24,17 @@ STAGING_VERSION = 1
 OVERLAY_ROOT = REPO / 'webui' / 'overlays'
 PATCH_ROOT = REPO / 'webui' / 'patches'
 
+LAUNCHERS = ('objc', 'swiftui')   # which iOS launcher a stage carries: the fork's ObjC port, or upstream's Swift one
+# Fork-only source files placed into an 'objc' stage (webui/overlays/<target>): the ObjC port of the launcher ...
 OVERLAY_TARGETS = {
-    'dm/gfx/nvn/nvn_spatial.inc',
-    'dm/gfx/nvn/nvn_spatial_size.h',
-    'dm/ios/Sources/DmLaunchSettings.h',
-    'dm/ios/Sources/DmLaunchSettings.m',
-    'dm/ios/Sources/DmPerfHud.m',
-    'dm/ios/Sources/dm_bundle_defaults.h',
-    'dm/ios/Sources/dm_launch_options.h',
+    'dm/ios/Sources/DmLauncher.m',
 }
+# ... and the upstream files it replaces (both define dm_show_launcher): removed from an 'objc' stage
+OBJC_REMOVED = (
+    'dm/ios/Sources/Launcher.swift',
+    'dm/ios/Sources/LauncherRow.swift',
+    'dm/ios/Sources/LauncherSettings.swift',
+)
 
 SKIP_DIR_NAMES = {'.git', '.webui-data', '.claude', '__pycache__', '.venv', 'venv', 'node_modules'}
 SKIP_DIR_PREFIXES = ('.iosdd',)
@@ -106,9 +109,15 @@ def _hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def compute_key(root: Path = REPO, stage_root: Path | None = None) -> str:
+def _overlay_targets(launcher: str):
+    return sorted(OVERLAY_TARGETS) if launcher == 'objc' else []
+
+
+def compute_key(root: Path = REPO, stage_root: Path | None = None, launcher: str = 'objc') -> str:
+    if launcher not in LAUNCHERS:
+        raise ValueError(f'unknown launcher: {launcher!r}')
     digest = hashlib.sha256()
-    digest.update(f'{STAGING_VERSION}\0{platform.system()}\0'.encode())
+    digest.update(f'{STAGING_VERSION}\0{platform.system()}\0{launcher}\0'.encode())
     for path in iter_files(root, stage_root):
         stat = path.stat()
         digest.update(f'{_rel(path, root)}\0{stat.st_size}\0{stat.st_mtime_ns}\n'.encode())
@@ -116,7 +125,7 @@ def compute_key(root: Path = REPO, stage_root: Path | None = None) -> str:
         digest.update(patch.relative_to(root).as_posix().encode() + b'\0')
         digest.update(target.encode() + b'\0')
         digest.update(patch.read_bytes())
-    for target in sorted(OVERLAY_TARGETS):
+    for target in _overlay_targets(launcher):
         source = OVERLAY_ROOT / target
         if not source.is_file():
             raise ValueError(f'missing overlay: {source}')
@@ -174,15 +183,18 @@ def _copy_tree(root: Path, tree: Path, stage_root: Path):
         shutil.copy2(source, destination)
 
 
-def ensure(root: Path = REPO, stage_root: Path | None = None, force: bool = False, keep: int | None = None) -> Path:
-    """Create or reuse a stage; return the tree directory inside it."""
+def ensure(root: Path = REPO, stage_root: Path | None = None, force: bool = False, keep: int | None = None,
+           launcher: str = 'objc') -> Path:
+    """Create or reuse a stage; return the tree directory inside it.
+
+    launcher 'objc' puts the ObjC port in place of Swift; 'swiftui' keeps Swift with the UI hooks."""
     stage_root = Path(stage_root or os.environ.get('NX_STAGE_ROOT') or root / '.webui-data' / 'stage')
     stage_root = stage_root.expanduser().resolve()
     stage_root.mkdir(parents=True, exist_ok=True)
     if keep is None:
-        keep = int(os.environ.get('NX_STAGE_KEEP', '3'))
+        keep = int(os.environ.get('NX_STAGE_KEEP', '4'))
     with _lock(stage_root / '.lock'):
-        key = compute_key(root, stage_root)
+        key = compute_key(root, stage_root, launcher)
         final = stage_root / key
         manifest = final / 'stage.json'
         if not force and manifest.is_file():
@@ -200,7 +212,10 @@ def ensure(root: Path = REPO, stage_root: Path | None = None, force: bool = Fals
             tree.mkdir(parents=True)
             _copy_tree(root, tree, stage_root)
             overlays = []
-            for target in sorted(OVERLAY_TARGETS):
+            if launcher == 'objc':
+                for target in OBJC_REMOVED:
+                    (tree / target).unlink(missing_ok=True)
+            for target in _overlay_targets(launcher):
                 source = OVERLAY_ROOT / target
                 if not source.is_file():
                     raise ValueError(f'missing overlay: {source}')
@@ -211,6 +226,8 @@ def ensure(root: Path = REPO, stage_root: Path | None = None, force: bool = Fals
             patches = []
             log = []
             for patch, target in patch_queue():
+                if launcher == 'objc' and target in OBJC_REMOVED:
+                    continue   # Swift-only UI hooks; the ObjC overlay implements them.
                 target_path = tree / target
                 if not target_path.is_file():
                     raise ValueError(f'patch target missing: {target}')
@@ -227,6 +244,8 @@ def ensure(root: Path = REPO, stage_root: Path | None = None, force: bool = Fals
                 'key': key,
                 'created': time.time(),
                 'platform': platform.system(),
+                'launcher': launcher,
+                'removed': list(OBJC_REMOVED) if launcher == 'objc' else [],
                 'repo': str(root),
                 'patches': patches,
                 'overlays': overlays,
@@ -282,6 +301,9 @@ def verify(stage: Path) -> dict:
         target = tree / item['target']
         if not target.is_file() or _hash(target.read_bytes()) != item['sha256']:
             raise ValueError(f'overlay changed: {item["target"]}')
+    for name in record.get('removed', []):
+        if (tree / name).exists():
+            raise ValueError(f'removed file is back: {name}')
     for item in record.get('patches', []):
         target = tree / item['target']
         if not target.is_file() or _hash(target.read_bytes()) != item['sha256']:
@@ -292,6 +314,6 @@ def verify(stage: Path) -> dict:
     return record
 
 
-def stage_path(stage_root: Path | None = None) -> Path:
+def stage_path(stage_root: Path | None = None, launcher: str = 'objc') -> Path:
     root = Path(stage_root or os.environ.get('NX_STAGE_ROOT') or REPO / '.webui-data' / 'stage')
-    return ensure(REPO, root)
+    return ensure(REPO, root, launcher=launcher)

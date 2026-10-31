@@ -1,9 +1,10 @@
 """Repository paths and small fork-wide helpers (no imports from upstream code)."""
+import os
 from pathlib import Path
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
-UPSTREAM_URL = 'https://github.com/seedds/nxnative.git'
+UPSTREAM_URL = os.environ.get('NX_UPSTREAM_URL') or 'https://github.com/seedds/nxnative.git'   # the override is for the sync tests
 DOCS_URL = 'https://github.com/xbunax/nxnative/blob/main/webui/docs/webui.md'
 
 DATA_EXCLUDES = ('.webui-data/',)

@@ -40,6 +40,14 @@ def local_link(source, destination):
         shutil.copy2(source, destination)
 
 
+def zip_app(folder, app, output, env):
+    """Archive the Mac app folder as <title>.app.zip (ditto keeps symlinks, signatures and attributes)."""
+    if not app.is_dir():
+        raise RuntimeError('Build did not produce the Mac app.')
+    output.unlink(missing_ok=True)
+    run(folder, ['ditto', '-c', '-k', '--keepParent', app, output], env)
+
+
 def execute(folder):
     task = json.loads((folder / 'task.json').read_text(encoding='utf-8'))
     config = json.loads(os.environ['NX_WEB_CONFIG'])
@@ -204,16 +212,17 @@ def execute(folder):
     if not needed <= versions:
         raise ValueError('Missing required versions: ' + ', '.join(sorted(needed - versions)))
     settings = task['settings']
-    if graphics == 'vulkan':
-        settings = dict(settings, DM_METALFX_SPATIAL='0')
-    defaults = folder / 'launch-defaults.json'
-    defaults.write_text(json.dumps(dict(settings, NX_WEBUI_RELEASE='1', NX_GRAPHICS=graphics)), encoding='utf-8')
-    envfile = folder / 'launch.env'
-    envfile.write_text('\n'.join(f'{k}={v}' for k, v in settings.items()) + '\n', encoding='utf-8')
-    env = dict(os.environ, NX_PROGRESS='1', NX_LAUNCH_DEFAULTS=str(defaults))
+    launcher = task.get('launcher', 'objc')
+    if launcher not in staging.LAUNCHERS:
+        raise ValueError('Unknown launcher.')
+    if launcher == 'swiftui' and platform.system() == 'Windows':
+        raise ValueError('The upstream SwiftUI launcher cannot be built on Windows; choose the ObjC launcher.')
+    # Both launchers show upstream's settings list (dm/launcher.json); the WebUI sets only the build's default game language
+    language = settings.get('DM_LANG', 'system')
+    env = dict(os.environ, NX_PROGRESS='1')
     emit(folder, 'stage', name='Preparing staged sources')
     stage_root = Path(os.environ.get('NX_STAGE_ROOT') or (folder.parent.parent / 'stage'))
-    stage = staging.ensure(REPO, stage_root)
+    stage = staging.ensure(REPO, stage_root, launcher=launcher)
     env.update(NX_STAGE_TREE=str(stage), NX_STAGE_KEY=stage.parent.name)
     env['PYTHONPATH'] = os.pathsep.join([str(stage), env.get('PYTHONPATH', '')])
     published = set()
@@ -241,20 +250,26 @@ def execute(folder):
         if platform.system() == 'Windows':
             command = [sys.executable, stage / 'webui/build/windows/build_ipa_windows.py', inputs,
                        '--game', str(g.dir) if provisional_build else title,
-                       '--keys', keys, '--tools', toolroot, '--out', output, '--env-file', envfile,
-                       '--launch-defaults', defaults]
+                       '--keys', keys, '--tools', toolroot, '--out', output]
+            if language != 'system': command += ['--language', language]
             for option in ('sdk', 'metal'):
                 if config.get(option): command += ['--' + option, config[option]]
             if separate_target: command += ['--separate-romfs']
             if provisional_build: command += ['--provisional']
         else:
+            # upstream's own Mac app (--platform mac-app) writes a .app folder; it is zipped below into the .app.zip output
+            built = output.with_suffix('') if target == 'mac' else output
             command = [sys.executable, stage / 'scripts/build_ipa_from_nsp.py', inputs, '--keys', keys,
-                       '--target', target, '--out', output, '--env-file', envfile, '--keep-extracted', '--progress', 'off']
+                       '--platform', 'mac-app' if target == 'mac' else 'ios', '--out', built,
+                       '--keep-extracted', '--progress', 'off']
+            if language != 'system': command += ['--language', language]
             if separate_target: command += ['--separate-romfs']
             if provisional_build:
                 command += ['--provisional', '--profile-out', str((folder / 'profile').resolve())]
         try:
             run(folder, command, env, cwd=stage)
+            if platform.system() != 'Windows' and target == 'mac':
+                zip_app(folder, built, output, env)
             if not output.is_file():
                 raise RuntimeError('Build did not produce its expected output.')
             if separate_target:

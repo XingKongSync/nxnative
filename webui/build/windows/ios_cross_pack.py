@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -64,7 +65,8 @@ def main():
         ap.add_argument('--' + name.replace('_', '-'), type=Path, required=True)
     ap.add_argument('--aoc', type=Path)
     ap.add_argument('--env-file', type=Path)
-    ap.add_argument('--launch-defaults', type=Path)
+    ap.add_argument('--nacp', type=Path, help='control.nacp (default: beside the RomFS folder); the launcher settings use its languages')
+    ap.add_argument('--language', help='the launcher\'s default game language (the Game language row)')
     ap.add_argument('--icon', type=Path)
     ap.add_argument('--prepare-only', action='store_true')
     ap.add_argument('--omit-romfs', action='store_true', help='Leave the RomFS out of the IPA (the separate archive is made by the caller)')
@@ -86,8 +88,17 @@ def main():
     (dm / 'font').mkdir(parents=True, exist_ok=True)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     else: (dm / 'env.txt').unlink(missing_ok=True)
-    if a.launch_defaults: shutil.copyfile(a.launch_defaults, stage / 'launch-defaults.json')
-    else: (stage / 'launch-defaults.json').unlink(missing_ok=True)
+    # the launcher's settings for this game, as build_ipa.sh writes them (dm/games/settings.py): the ObjC launcher (overlay DmLauncher.m) reads dm/launcher.json
+    nacp = a.nacp or (a.romfs.parent / 'control.nacp')
+    launcher = dm / 'launcher.json'
+    launcher.unlink(missing_ok=True)
+    if nacp.is_file():
+        env = dict(os.environ, GFXAPI='nvn', DM_GAMES_DIR=str(a.profile.resolve().parent))
+        if a.language: env['DM_LANG'] = a.language
+        else: env.pop('DM_LANG', None)
+        subprocess.run([sys.executable, str(repo / 'dm/games/settings.py'), g.id, str(a.patched), str(nacp), str(launcher)], check=True, env=env)
+    else:
+        print(f'no control.nacp at {nacp}: the app has no launcher settings and starts the game at once')
     for pattern in ('*.fixups.tsv', '*.gates.tsv', '*.params.tsv', '*.cuts.tsv', '*.obs.tsv'):
         for source in a.patched.glob(pattern):
             shutil.copyfile(source, dm / source.name)

@@ -12,8 +12,7 @@ beside it and the upstream-sync workflow under `.github/`:
 |---|---|
 | `webui/` | Local build studio (FastAPI), task queue, launchers, tool preparation |
 | `webui/build/windows/` | Windows iOS cross-compile, shader build and IPA packer |
-| `webui/build/macos/` | macOS application wrapper and packager |
-| `webui/overlays/dm/` | Fork-only source files placed into the staged `dm/` tree |
+| `webui/overlays/dm/` | Fork-only source files placed into the staged `dm/` tree (the ObjC port of the iOS launcher) |
 | `webui/patches/` | Upstream hook patches applied only to the build staging tree |
 | `webui/launchers/` | Canonical launchers (thin wrappers are at the repository root) |
 | `webui/tools/` | Staging, patch queue, sync checks and helper CLIs |
@@ -25,6 +24,16 @@ beside it and the upstream-sync workflow under `.github/`:
 Windows: double-click `start-webui.bat` (or `webui\launchers\start_webui.bat`).
 macOS: run `./start-webui.sh` in a terminal (or double-click `start-webui.command`; the internal launcher is `webui/launchers/start_webui.sh`).
 
+The browser opens automatically; otherwise, use the complete session URL printed
+in the terminal. Keep that terminal open. In **Environment & tools**, install
+missing supported dependencies and select **Recheck**, then upload/import the
+game packages and `prod.keys`, choose the output and start a build. Download the
+result from the task when it finishes.
+
+Step-by-step startup, platform requirements, launcher languages, retry and cleanup:
+[WebUI README](webui/README.md). Detailed installation and SDK discovery:
+[WebUI guide](webui/docs/webui.md).
+
 The launchers keep their data in the repository's `.webui-data/` directory. That
 directory is local-only and is added to `.git/info/exclude`; the upstream
 `.gitignore` is not modified.
@@ -32,8 +41,8 @@ directory is local-only and is added to `.git/info/exclude`; the upstream
 ## Builds use a stage
 
 A build never writes into the upstream working tree. `webui/staging.py` copies
-the repository into `.webui-data/stage/<key>/tree`, applies the seven overlays and
-the nine patches under `webui/patches/`, and runs the build from that copy. The
+the repository into `.webui-data/stage/<key>/tree`, applies the overlays and
+the hook patches under `webui/patches/`, and runs the build from that copy. The
 stage is reused until a source file or patch changes.
 
 The only intentional direct edit to an upstream file is `dm/ios/project.yml`,
@@ -43,7 +52,7 @@ and `UILaunchScreen`). Everything else is a patch or an overlay.
 The optional **Separate IPA and RomFS** iOS build is off by default. When
 selected, the IPA leaves out `romfs/` and the task also produces a
 `<title>.romfs.zip` (top-level `romfs/`) with `webui/build/romfs_archive.py`;
-the Windows builder and patches 0008/0009 carry the hooks. The app reads
+the Windows builder and patch 0005 carries the hook. The app reads
 `Documents/romfs` with no app-side change. macOS `.app.zip` stays self-contained.
 
 ## Upstream sync

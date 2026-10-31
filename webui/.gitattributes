@@ -1,0 +1,7 @@
+# Line endings for the fork's own tree. The repository-root rules live in the
+# root .gitattributes; keeping the bulk here avoids touching upstream's file.
+**/*.sh text eol=lf
+**/*.command text eol=lf
+**/*.patch text eol=lf
+**/*.bat text eol=crlf
+**/*.ps1 text eol=crlf

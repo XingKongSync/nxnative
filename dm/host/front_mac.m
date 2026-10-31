@@ -1,6 +1,6 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
-// The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN starts it that way. ⌘Q quits; the left mouse button is the touchscreen.
+// The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits; the left mouse button is the touchscreen.
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad, J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
 // Controllers: buttons by position as on the iPhone (right A, bottom B, top X, left Y), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
@@ -15,16 +15,21 @@
 #include "hle.h"
 #include "pad_slots.h"
 #include "haptics_apple.h"
+#include "motion_apple.h"
+#include "motion_pro_mac.h"
 #include <signal.h>
 #include <math.h>
 
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
+static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
 int front_screen_max_fps(void) { return g_screen_fps; }
+static _Atomic int g_fullscreen;   // the window is in fullscreen (set when it has entered and when it has left)
+int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency: frame latency 2 in fullscreen
 // The screen's refresh rate matched to the game's frame rate in fullscreen (front_screen_match, from PR #79; DM_SCREEN_MATCH=0 turns it off). 60 fps on a 144 Hz screen cannot be paced
 // evenly: the display link counts a tick on the refresh nearest each 1/60 s slot (nvn_mtl.m link_range), so frames stay up 2 and 3 refreshes in turn (13.9 / 20.8 ms) and Apple's HUD shows
 // the frame interval jumping between them. In fullscreen, a screen whose rate is not a multiple of the game's switches to the mode of the same size with the highest rate that is (144 → 120 Hz
@@ -96,6 +101,7 @@ static int key_bit(unsigned short code) {
     return -1;
 }
 static void on_key(NSEvent *e, int down) {
+    if (!g_input_on) return;
     unsigned short c = e.keyCode;
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     int b = key_bit(c);
@@ -114,6 +120,7 @@ static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept 
 static int g_merge, g_kbd_own;
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
 static void pad_read(GCExtendedGamepad *g) {
+    if (!g_input_on) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
     uint64_t m = 0;
@@ -127,21 +134,33 @@ static void pad_read(GCExtendedGamepad *g) {
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
+static void pro_players_changed(GCController *gone) {
+    int count = 0, player = -1;
+    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && [c.productCategory isEqualToString:@"Switch Pro Controller"]) {
+        count++; player = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
+    }
+    dm_motion_pro_players(count, player);
+}
+static void pro_devices_changed(void) { pro_players_changed(nil); }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
             any = 1; c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
+            dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
             pad_read(c.extendedGamepad);
         }
+        if (gone) dm_motion_detach(gone, 0);
         if (!any) { dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }
+        pro_players_changed(gone);
         return;
     }
     NSArray<GCController *> *now = GCController.controllers; char nb[16];
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
+        dm_motion_detach(g_held[p], p);
         dm_haptics_apple_controller(p, nil);
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
@@ -151,10 +170,30 @@ static void pads_changed(GCController *gone) {
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c;
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
-        npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)", pad_name(c), p + 1, nb);
+        dm_motion_attach(c, p);
+        npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
         pad_read(c.extendedGamepad);
     }
     dm_pad_players(pad_slot_mask(&g_slots));
+    pro_players_changed(gone);
+}
+// Focus: a window that is no longer key sees no key-up, mouse-up or controller release, so whatever is held when it loses focus (another app, the text box, minimized) would
+// stay pressed in the game. The front end releases only what it pressed itself: scripted buttons and sticks have their own path, and the touch is also DM_KEYS / DM_CTL's (hle_hid.c).
+// Out of focus a controller's changes are ignored, so back in focus each controller is read as it is now (a button still held, a stick still deflected)
+static int g_mouse_down;   // the mouse holds the touch (DmGameView)
+static void input_release(void) {
+    g_input_on = 0;
+    dm_motion_pro_active(0);
+    g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+    if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+    if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
+    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+}
+static void input_resume(void) {
+    g_input_on = 1;
+    dm_motion_pro_active(1);
+    if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
+    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
 }
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
@@ -164,6 +203,7 @@ static void pads_start(void) {
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     pads_changed(nil);
+    dm_motion_pro_start(pro_devices_changed);
 }
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,
@@ -172,15 +212,16 @@ static void pads_start(void) {
 @implementation DmGameView
 - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
 - (void)mouseDragged:(NSEvent *)e {
+    if (!g_input_on) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
     if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;   // the centered 16:9 picture the present fits into the view, as on the iPhone (DmGamepad.m)
     double x0 = (b.width - w) / 2, y0 = (b.height - h) / 2;
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
-    dm_touch_set(&t, 1);
+    dm_touch_set(&t, 1); g_mouse_down = 1;
 }
-- (void)mouseUp:(NSEvent *)e { (void)e; dm_touch_set(NULL, 0); }
+- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -201,7 +242,7 @@ static void *guest_tramp(void *p) {
 }
 
 // Metal reads MTL_HUD_ENABLED when the process makes its first device, which can be before the window: set from DM_METAL_HUD before main (set in front_run, the HUD did not show)
-__attribute__((constructor)) static void hud_env(void) { if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) setenv("MTL_HUD_ENABLED", "1", 0); }
+__attribute__((constructor)) static void hud_env(void) { front_hud_env(); }
 void front_run(void (*guest)(void)) {
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
@@ -237,7 +278,8 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
-        if (getenv("DM_FULLSCREEN")) dispatch_async(dispatch_get_main_queue(), ^{ [win toggleFullScreen:nil]; });   // start in fullscreen
+        const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
+        if (fs && strcmp(fs, "0")) dispatch_async(dispatch_get_main_queue(), ^{ [win toggleFullScreen:nil]; });
         for (NSNotificationName nm in @[GCControllerDidConnectNotification, GCControllerDidDisconnectNotification])
             [NSNotificationCenter.defaultCenter addObserverForName:nm object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
                 GCController *c = n.object; int conn = n.name == GCControllerDidConnectNotification;
@@ -253,16 +295,17 @@ void front_run(void (*guest)(void)) {
         }];
         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:win queue:nil
                                                       usingBlock:^(NSNotification *n) { (void)n; exit(0); }];
-        // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1)
+        // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
+        // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (win.screen) { g_screen_fps = (int)win.screen.maximumFramesPerSecond; g_layer.contentsScale = win.backingScaleFactor; } screen_match_apply(); }];
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
-        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (!win.miniaturized) dm_focus_set(2); }];
-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(1); }];
-        [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
+        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
+        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized) dm_focus_set(2); }];
+        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
+        [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
         static guest_arg ga; ga.fn = guest;
@@ -270,6 +313,36 @@ void front_run(void (*guest)(void)) {
         pthread_t th; if (pthread_create(&th, &a, guest_tramp, &ga)) die("pthread_create guest");
         [NSApp run];
     }
+}
+
+// Progress screen of the prepare step (front.h front_progress): a dark view over the game's, the title, a bar and a count, centered; AppKit views, so it draws while the game's thread waits
+static NSView *g_prog; static NSTextField *g_prog_title, *g_prog_count; static NSProgressIndicator *g_prog_bar;
+static NSTextField *prog_label(NSRect r, CGFloat size, NSFontWeight w, NSColor *c) {
+    NSTextField *t = [NSTextField labelWithString:@""]; t.frame = r; t.alignment = NSTextAlignmentCenter; t.textColor = c;
+    t.font = [NSFont monospacedDigitSystemFontOfSize:size weight:w]; return t;
+}
+void front_progress(const char *title, long done, long total) {
+    if (!g_layer) return;
+    NSString *tt = title ? @(title) : nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; return; }
+        if (!g_prog) {
+            NSView *cv = g_win.contentView;
+            g_prog = [[NSView alloc] initWithFrame:cv.bounds]; g_prog.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            g_prog.wantsLayer = YES; g_prog.layer.backgroundColor = [NSColor colorWithWhite:0.06 alpha:0.94].CGColor;
+            NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(floor((cv.bounds.size.width - 400) / 2), floor((cv.bounds.size.height - 96) / 2), 400, 96)];
+            box.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin | NSViewMaxYMargin;
+            g_prog_title = prog_label(NSMakeRect(0, 62, 400, 30), 20, NSFontWeightSemibold, NSColor.whiteColor);
+            g_prog_bar = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(20, 36, 360, 20)];
+            g_prog_bar.style = NSProgressIndicatorStyleBar; g_prog_bar.indeterminate = NO; g_prog_bar.minValue = 0;
+            g_prog_count = prog_label(NSMakeRect(0, 4, 400, 22), 13, NSFontWeightRegular, [NSColor colorWithWhite:0.72 alpha:1]);
+            [box addSubview:g_prog_title]; [box addSubview:g_prog_bar]; [box addSubview:g_prog_count]; [g_prog addSubview:box];
+            [cv addSubview:g_prog];
+        }
+        g_prog_title.stringValue = tt; g_prog_bar.maxValue = total > 0 ? (double)total : 1; g_prog_bar.doubleValue = (double)done;
+        g_prog_count.stringValue = [NSString stringWithFormat:@"%@ of %@", [NSNumberFormatter localizedStringFromNumber:@(done) numberStyle:NSNumberFormatterDecimalStyle],
+                                    [NSNumberFormatter localizedStringFromNumber:@(total) numberStyle:NSNumberFormatterDecimalStyle]];
+    });
 }
 
 // Software keyboard input box (front.h): the main thread shows an NSAlert + text field and the guest thread waits synchronously for the result. Not shown in windowless mode (returns -1, the caller treats it as cancel)

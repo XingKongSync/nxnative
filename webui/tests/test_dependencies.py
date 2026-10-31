@@ -6,6 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 import zipfile
+from webui.tests import require
+require('fastapi')   # skipped when the package is missing
+
 from fastapi.testclient import TestClient
 from webui import dependencies as deps
 from webui.server import create_app

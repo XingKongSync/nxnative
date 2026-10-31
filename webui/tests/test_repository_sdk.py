@@ -6,6 +6,9 @@ import unittest
 from unittest.mock import Mock, patch
 import zipfile
 
+from webui.tests import require
+require('fastapi')   # skipped when the package is missing
+
 from fastapi.testclient import TestClient
 from webui import apple_tools as apple, dependencies as deps
 from webui.capabilities import environment

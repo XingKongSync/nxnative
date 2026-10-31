@@ -1,8 +1,8 @@
 #include <stdbool.h>
 
-// The Windows cross-build compiles no Swift, so Launcher.swift (which defines
-// dm_show_launcher) is absent. The fork's ObjC DmLaunchSettings screen is the
-// launcher there; returning false starts the game after it applies its settings.
+// Fallback only: ios_cross_compile.py links this when the stage has no ObjC launcher
+// (webui/overlays/dm/ios/Sources/DmLauncher.m), because the Windows cross-build cannot compile
+// upstream's Swift launcher. Returning false starts the game at once with its defaults.
 bool dm_show_launcher(void *view_controller, void (*done)(void)) {
     (void)view_controller;
     (void)done;

@@ -1,12 +1,12 @@
 # <patch file> <repository-relative target>
-# Base: fa69e20a280413d56e64edcb8736bf9329957f77
-# Fork ref: c586dd15b01e52cb7a31732163786ab4a54101b9
+# Base: 3950976088c066cc9e40f33ee244404d2031e163
+# Fork ref: 82a11759f834d898c54f4fb8b9f8c77ff93c2e7a
 0001-shader-split-posix-paths.patch dm/gfx/tools/shader_split.py
 0002-gen-embed-posix-paths-sections.patch dm/ios/tools/gen_embed.py
 0003-hle-count-targetconditionals.patch dm/host/hle_count.c
 0004-nx-extract-catalog.patch dm/tools/nx_extract/Program.cs
-0005-host-makefile-metalfx.patch dm/host/Makefile
-0006-nvn-mtl-spatial-upscaling.patch dm/gfx/nvn/nvn_mtl.m
-0007-main-launch-settings.patch dm/ios/Sources/main.m
-0008-build-ipa-launch-defaults.patch dm/ios/tools/build_ipa.sh
-0009-build-ipa-from-nsp-webui.patch scripts/build_ipa_from_nsp.py
+0005-build-ipa-from-nsp-webui.patch scripts/build_ipa_from_nsp.py
+0006-launcher-ui-translations.patch dm/games/settings.py
+0007-launcher-ui-language-model.patch dm/ios/Sources/LauncherSettings.swift
+0008-launcher-ui-language-picker.patch dm/ios/Sources/Launcher.swift
+0009-launcher-ui-language-rows.patch dm/ios/Sources/LauncherRow.swift

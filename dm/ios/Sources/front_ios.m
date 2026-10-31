@@ -15,6 +15,7 @@ UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_reset(void);
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
+const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
 
 static CAMetalLayer *g_layer;
@@ -150,7 +151,8 @@ static void front_ios_register_external_accessory(UIViewController *vc) {
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
         lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
-        lb.text = @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart.";
+        const char *why = front_ios_boot_message();
+        lb.text = why ? [NSString stringWithFormat:@"Game files unusable.\n%s", why] : @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart.";
         [self.view addSubview:lb]; return;
     }
     front_ios_audio_watch();
@@ -158,7 +160,7 @@ static void front_ios_register_external_accessory(UIViewController *vc) {
 // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
 - (void)startGame {
     if (self.game) return;
-    if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) setenv("MTL_HUD_ENABLED", "1", 0);   // Metal reads it when a device is made: before the game view makes its own (an env file's DM_METAL_HUD sets it in main.m already)
+    front_hud_env();   // before the game view makes its device (an env file's DM_METAL_HUD sets it in main.m already)
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
@@ -190,6 +192,11 @@ static void front_ios_register_external_accessory(UIViewController *vc) {
 }
 - (void)viewDidAppear:(BOOL)a {
     [super viewDidAppear:a];
+    if (!front_ios_boot_ok() && front_ios_boot_message() && !self.presentedViewController) {   // a slim build whose game file image is missing or another version (main.m)
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Game files" message:@(front_ios_boot_message()) preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:a animated:YES completion:nil];
+    }
     if (self.launched || !front_ios_boot_ok()) return;
     self.launched = YES; g_root = self;
     if (self.view.window) [self.view.window makeKeyWindow];   // an external window must not take the phone's touches
@@ -238,6 +245,32 @@ static UILabel *front_ios_fps_label(void) {
     return l;
 }
 
+// Progress screen of the prepare step (front.h front_progress): a dark view over the game's view and the pad, the title, a bar and a count, centered; UIKit views, so it draws while the game's thread waits
+static UIView *g_prog; static UILabel *g_prog_count; static UIProgressView *g_prog_bar; static UILabel *g_prog_title;
+void front_progress(const char *title, long done, long total) {
+    if (!g_layer) return;
+    NSString *tt = title ? @(title) : nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; return; }
+        if (!g_prog) {
+            UIView *root = g_root.view; if (!root) return;
+            g_prog = [[UIView alloc] initWithFrame:root.bounds]; g_prog.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            g_prog.backgroundColor = [UIColor colorWithWhite:0.06 alpha:0.94];
+            UIView *box = [[UIView alloc] initWithFrame:CGRectMake(floor((root.bounds.size.width - 320) / 2), floor((root.bounds.size.height - 96) / 2), 320, 96)];
+            box.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+            g_prog_title = [[UILabel alloc] initWithFrame:CGRectMake(0, 4, 320, 30)]; g_prog_title.textAlignment = NSTextAlignmentCenter; g_prog_title.textColor = UIColor.whiteColor;
+            g_prog_title.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
+            g_prog_bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault]; g_prog_bar.frame = CGRectMake(20, 48, 280, 4);
+            g_prog_count = [[UILabel alloc] initWithFrame:CGRectMake(0, 64, 320, 22)]; g_prog_count.textAlignment = NSTextAlignmentCenter;
+            g_prog_count.textColor = [UIColor colorWithWhite:0.72 alpha:1]; g_prog_count.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
+            [box addSubview:g_prog_title]; [box addSubview:g_prog_bar]; [box addSubview:g_prog_count]; [g_prog addSubview:box];
+            [root addSubview:g_prog];
+        }
+        g_prog_title.text = tt; g_prog_bar.progress = total > 0 ? (float)done / (float)total : 0;
+        g_prog_count.text = [NSString stringWithFormat:@"%@ of %@", [NSNumberFormatter localizedStringFromNumber:@(done) numberStyle:NSNumberFormatterDecimalStyle],
+                             [NSNumberFormatter localizedStringFromNumber:@(total) numberStyle:NSNumberFormatterDecimalStyle]];
+    });
+}
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 
@@ -285,9 +318,9 @@ void front_save_failed(int err) {
 }
 
 // Audio session: the frames RemoteIO asks for in each callback follow the I/O buffer duration, about 21 ms by default on iOS (1024 frames at 48 kHz). The game keeps only 4 blocks × 5 ms = 20 ms in flight,
-// so every callback came up 1.3 ms short and was zero-filled, about 47 gaps per second (crackling; reproducible on the Mac by forcing 1024-frame callbacks: 1999 underruns in 2000 callbacks). Ask for 5 ms and the system picks the nearest it supports.
-// Playback: game sound is media (it keeps playing with the Ring/Silent switch silent) and is the category whose routes include a display's audio output (HDMI / DisplayPort / AirPlay). The default SoloAmbient is silenced by that
-// switch and stays on the built-in output, which is why a car's DP Audio was selectable but silent. Set once at boot and again on return to the foreground (the system may reset it after an interruption)
+// so every callback came up 1.3 ms short and was zero-filled, about 47 gaps per second (crackling; reproducible on the Mac by forcing 1024-frame callbacks: 1999 underruns in 2000 callbacks). Ask for 5 ms and the system picks the nearest it supports;
+// the category is Playback, as a game's or media app's: the ring / silent switch does not mute it (the default SoloAmbient follows the switch, which silenced the game whenever the phone was on silent) and it still interrupts other apps' audio.
+// Set once at boot and again on return to the foreground (the system may reset it after an interruption)
 static int g_session_off;   // the last activation failed (another app or a call still held the session): tried again when the app becomes active
 void front_ios_audio_session(void) {
     AVAudioSession *s = AVAudioSession.sharedInstance; NSError *e = nil;
